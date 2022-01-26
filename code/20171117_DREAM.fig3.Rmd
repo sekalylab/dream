@@ -1,0 +1,233 @@
+---
+title: "DREAN RV Fig3"
+author: "Slim FOURATI"
+date: "12/09/2014"
+output: github_document
+---
+
+```{r load-packages}
+suppressPackageStartupMessages(library(package = "knitr"))
+suppressPackageStartupMessages(library(package = "readxl"))
+suppressPackageStartupMessages(library(package = "readr"))
+suppressPackageStartupMessages(library(package = "glmnet"))
+suppressPackageStartupMessages(library(package = "pheatmap"))
+suppressPackageStartupMessages(library(package = "ggplot2"))
+suppressPackageStartupMessages(library(package = "nlme"))
+suppressPackageStartupMessages(library(package = "dplyr"))
+suppressPackageStartupMessages(library(package = "tidyr"))
+suppressPackageStartupMessages(library(package = "tibble"))
+```
+
+set session options
+```{r session-options}
+knitr::opts_chunk$set(echo = TRUE) # do not echo chunks
+opts_chunk$set(tidy = FALSE, fig.path = "../figure/")
+options(dplyr.summarise.inform = FALSE)
+workDir <- dirname(getwd())
+```
+
+```{r read-input}
+inputFile <- "Project 4 analysis summary KYedit - uniform terms.xlsx"
+inputDF <- read_excel(path = file.path(workDir, "input", inputFile))
+# correct subchallenge and time fields
+inputDF <- inputDF %>%
+  mutate(Subchallenge = gsub(pattern     = "42737.0",
+                             replacement = "1,2",
+                             Subchallenge),
+         Subchallenge = gsub(pattern     = "42769.0",
+                             replacement = "2,3",
+                             Subchallenge),
+         Subchallenge = gsub(pattern     = ".0",
+                             replacement = "",
+                             Subchallenge),
+         Subchallenge = gsub(pattern     = "ALL",
+                             replacement = "1,2,3",
+                             Subchallenge),
+         Time         = gsub(pattern     = ".0",
+                             replacement = "",
+                             Time),
+         Time         = gsub(pattern     = "ALL",
+                             replacement = "0,24",
+                             Time))
+# split Subchallenge
+subchallengeLS <- inputDF$Subchallenge %>%
+  strsplit(split = ",") %>%
+  setNames(nm = rownames(inputDF)) %>%
+  stack() %>%
+  mutate(ind = as.vector(ind))
+inputDF <- inputDF[match(subchallengeLS$ind, table = rownames(inputDF)), ] %>%
+  mutate(Subchallenge = subchallengeLS$values)
+# split Time
+timeLS <- inputDF$Time %>%
+  strsplit(split = ",") %>%
+  setNames(nm = rownames(inputDF)) %>%
+  stack() %>%
+  mutate(ind = as.vector(ind))
+inputDF <- inputDF[match(timeLS$ind, table = rownames(inputDF)), ] %>%
+  mutate(Time = timeLS$values)
+# add rownames to input
+inputDF <- inputDF %>%
+  rownames_to_column()
+# split Preprocessing
+preprocLS <- inputDF$Preprocessing %>%
+  strsplit(split = ", ") %>%
+  setNames(nm = inputDF$rowname) %>%
+  stack() %>%
+  mutate(ind  = as.vector(ind),
+         flag = 1) %>%
+  filter(!(values %in% "NA") & !is.na(values)) %>%
+  spread(values, flag) %>%
+  setNames(nm = paste0("Preprocessing.", names(.)))
+preprocLS[is.na(preprocLS)] <- 0
+inputDF <- inputDF %>%
+  merge(y = preprocLS, by.x = "rowname", by.y = "Preprocessing.ind", all.x = TRUE)
+# split Feature selection
+featLS <- inputDF$"Feature selection" %>%
+  gsub(pattern     = "t-test",
+       replacement = "T-test based") %>%
+  gsub(pattern     = "Poisson Elastic Net",
+       replacement = "Machine learning method related") %>%
+  strsplit(split = ", ") %>%
+  setNames(nm = inputDF$rowname) %>%
+  stack() %>%
+  mutate(ind = as.vector(ind),
+         flag = 1) %>%
+  filter(!(values %in% "NA")) %>%
+  distinct() %>% # Team Jiayi Hou Feature selection is duplicated
+  spread(values, flag) %>%
+  setNames(nm = paste0("Feature selection.", names(.)))
+featLS[is.na(featLS)] <- 0
+inputDF <- inputDF %>%
+  merge(y = featLS, by.x = "rowname", by.y = "Feature selection.ind", all.x = TRUE)
+# split Machine learning
+mlLS <- inputDF$"Machine learning method" %>%
+  gsub(pattern = "For both SC1 and SC2.+",
+       replacement = "Other") %>%
+  strsplit(split = ", ") %>%
+  setNames(nm = inputDF$rowname) %>%
+  stack() %>%
+  mutate(ind = as.character(ind),
+         flag = 1) %>%
+  filter(!(values %in% "NA")) %>%
+  spread(values, flag) %>%
+  setNames(nm = paste0("Machine learning method.", names(.)))
+mlLS[is.na(mlLS)] <- 0
+inputDF <- inputDF %>%
+  merge(y = mlLS, by.x = "rowname", by.y = "Machine learning method.ind", all.x = TRUE)
+``` 
+
+```{r read-ind-auc-cor}
+indResDF <- read_csv(file = file.path(workDir, "input/Independent_SC1_SC2_SC3.csv"))
+# correct team name
+inputDF <- inputDF %>%
+  mutate(`Team name...1` = tolower(`Team name...1`),
+         `Team name...1` = gsub(pattern = "jiayi hou",
+                               replacement = "isabella jiayi hou",
+                               `Team name...1`))
+inputDF <- merge(x     = inputDF,
+                 y     = indResDF,
+                 by.x  = "Team name...1",
+                 by.y  = "team",
+                 all.x = TRUE)
+```
+
+```{r read-lead-auc-cor}
+leadResDF <- read_csv(file = file.path(workDir, "input/Leaderboard_SC1_SC2_SC3.csv")) %>%
+  mutate(team = ifelse(test = team %in% "cgateam",
+                       yes  = "cga team",
+                       no   = team),
+         team = ifelse(test = team %in% "jiayi hou",
+                       yes  = "isabella jiayi hou",
+                       no   = team))
+# correct team name
+inputDF <- merge(x     = inputDF,
+                 y     = leadResDF,
+                 by.x  = "Team name...1",
+                 by.y  = "team",
+                 all.x = TRUE)
+```
+
+```{r summary-heatmap}
+summaryDF <- read_excel(path = file.path(workDir, "input/Project4.summary.xlsx"))
+mat <- summaryDF %>%
+  gather(cname, value, -...1) %>%
+  mutate(value = c("+" = 1, "-" = -1)[value]) %>%
+  spread(cname, value) %>%
+  as.data.frame()
+rownames(mat) <- mat$"...1"
+mat$X__1 <- NULL
+mat <- mat[summaryDF$"...1", names(summaryDF)[-1]]
+pheatmap(mat,
+         cluster_cols = FALSE,
+         cluster_rows = FALSE,
+         legend = FALSE,
+         cellwidth = 10,
+         cellheight = 10,
+         gaps_col = seq(from = 2, to = ncol(mat), by = 2))
+``` 
+
+```{r exclude-sc2}
+plotDF <- NULL
+#
+#
+tempDF <- filter(inputDF, Subchallenge %in% 2 & Time %in% 0) %>%
+  rename(`Team name` = `Team name...1`) %>%
+  select(`Team name`,
+         Subchallenge,
+         Time,
+         Leaderboard_SC2_hour0_AUC,
+         `Independent_SC2_0_AUC`,
+         `Preprocessing.Excluding samples`) %>%
+  gather(Dataset,
+         AUC,
+         -`Team name`,
+         -Subchallenge,
+         -Time,
+         -`Preprocessing.Excluding samples`)
+plotDF <- rbind(plotDF, tempDF)
+tempDF <- filter(inputDF, Subchallenge %in% 2 & Time %in% 24) %>%
+    rename(`Team name` = `Team name...1`) %>%
+
+  select(`Team name`,
+         Subchallenge,
+         Time,
+         Leaderboard_SC2_hour24_AUC,
+         `Independent_SC2_24_AUC`,
+         `Preprocessing.Excluding samples`) %>%
+  gather(Dataset,
+         AUC,
+         -`Team name`,
+         -Subchallenge,
+         -Time,
+         -`Preprocessing.Excluding samples`)
+plotDF <- rbind(plotDF, tempDF)
+#
+# plot
+plotDF <- plotDF %>%
+  filter(!is.na(`Preprocessing.Excluding samples`)) %>%
+  mutate(`Preprocessing.Excluding samples` = 
+           factor(`Preprocessing.Excluding samples`),
+         Dataset = gsub(pattern = "^([^_]+).+",
+                        replacement = "\\1",
+                        Dataset),
+         AUC = as.numeric(AUC))
+ggplot(data = plotDF,
+       mapping = aes(x = `Preprocessing.Excluding samples`, y = AUC)) +
+  geom_dotplot(binaxis = "y", binwidth = 0.01, dotsize = 2, 
+               stackdir = "center", mapping = aes(fill = `Team name`),
+               color = "transparent") +
+  geom_boxplot(outlier.colour = "transparent", fill = "transparent") +
+  facet_grid(facets = Subchallenge ~ interaction(Dataset, Time)) +
+  labs(y = "AUC") +
+  theme_bw()
+
+statDF <- plotDF %>%
+  group_by(Dataset, Subchallenge, Time) %>%
+  do(p = wilcox.test(formula = AUC ~ `Preprocessing.Excluding samples`,
+                     data = .)$p.value) %>%
+  mutate(p = unlist(p))
+``` 
+
+```{r session-info}
+sessionInfo()
+```
